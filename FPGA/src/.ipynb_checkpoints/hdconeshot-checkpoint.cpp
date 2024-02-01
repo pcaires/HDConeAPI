@@ -15,7 +15,6 @@
 // OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT 
 // (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY
 // OF SUCH DAMAGE.
-
 #include <CL/sycl.hpp>
 #include <chrono>
 #include <ctime>
@@ -39,7 +38,7 @@
 
 #define chunk 16
 
-#define numPipes 25
+#define numPipes 8
 
 //#define D 2000
 #define NCLASSMAX 10
@@ -56,7 +55,7 @@
 #define INTERIM 5
 #define PERC_UPDATE 0.2
 #define NUMREGEN 200
-#define MAXBATCH 256
+#define MAXBATCH 250
 
 #define K DMAX / numPipes
 
@@ -81,7 +80,6 @@ template<int i> class encodeKernel;
 class classifyKernel1;
 class classifykernel2;
 class producer;
-class consumer;
 template<int i> class bundler;
 using namespace std::chrono;
 
@@ -170,6 +168,8 @@ void validateEncoding(float *bases, std::vector<std::vector<float>> data, float 
     }
 }
 
+
+
 void validateBundling(float *classes, float *referenceClasses, float *bases, std::vector<std::vector<float>> data, int *labels, int numDim, int numData, int numClasses, int numFeats) {
     float epsilon = 0.00005;
     
@@ -202,35 +202,6 @@ void validateBundling(float *classes, float *referenceClasses, float *bases, std
                 std::cout << "\tClass " << i << " Dim " << j << "\t" << fabs(classes[i * numDim + j] - referenceClasses[i * numDim + j]) << "\n";
                 break;
             }
-        }
-    }
-}
-
-
-void validateInference(float *bases, float *classes, std::vector<std::vector<float>> data, int *referencePreds, int numData, int numDim, int numFeats, int numClasses) {
-    for(int i = 0; i < numData; i++) {
-        float encoded[numDim];
-        for(int j = 0; j < numDim; j++) {
-            float sum = 0.0;
-            for(int k = 0; k < numFeats; k++) {
-                sum += bases[j * numFeats + k] * data[i][k];
-            }
-            encoded[j] = cosf(sum);
-        }
-        float max = 0.0;
-        float maxInd = 0;
-        for(int j = 0; j < numClasses; j++) {
-            float sum = 0;
-            for(int k = 0; k < numDim; k++) {
-                sum += classes[j * numDim + k] * encoded[k];
-            }
-            if(sum >= max) {
-                max = sum;
-                maxInd = j;
-            }
-        }
-        if(maxInd != referencePreds[i]) {
-            std::cout << "incorrect:\t" << i << "\t" <<  maxInd << "\t" << referencePreds[i]<< std::endl;
         }
     }
 }
@@ -284,32 +255,35 @@ Data readData(char *filename, queue &q) {
 
 class encodePipe;
 class bundlePipe;
-class maxPipe;
-using toEncode = PipeArray<encodePipe, float, 4 * NFEATMAX, numPipes>;
-using toClassify = PipeArray<bundlePipe, float, 8 * K, numPipes>;
-using toConsume = PipeArray<maxPipe, float, 8 * K, numPipes>;
+using toEncode = PipeArray<encodePipe, float, NFEATMAX, numPipes>;
+using toClassify = PipeArray<bundlePipe, float, K, numPipes>;
+
 template<int npipes>
 void produce(queue &q, float* input, int numData, int numFeats) {
     const int numBatches = NTRAIN / MAXBATCH + 1;
     q.submit([&](auto &h) { 
         h.template single_task<producer>([=]() [[intel::kernel_args_restrict]] {
-            float localInput[MAXBATCH][NFEATMAX];
-            
-            for(int j = 0, k = 0, l = 0; j < MAXBATCH * NFEATMAX; j++) {
-                localInput[k][l] = input[j];
-                l++;
-                if(l == NFEATMAX) {
-                    l = 0;
-                    k++;
+            for(int i = 0; i < numBatches; i++) {
+                float localInput[MAXBATCH][NFEATMAX];
+                for(int j = 0, k = 0, l = 0; j < MAXBATCH * NFEATMAX; j++) {
+                    localInput[k][l] = input[i * MAXBATCH * NFEATMAX + j];
+                    l++;
+                    if(l == NFEATMAX) {
+                        l = 0;
+                        k++;
+                    }
                 }
-            }
-            for(int j = 0; j < MAXBATCH; j++) {
-                for(int k = 0; k < NFEATMAX; k++) {
-                    
-                    impu::UnrolledLoop<npipes>([&] (auto l) {
-                        toEncode::PipeAt<l>::write(localInput[j][k]);
-                    });
+                for(int j = 0; j < MAXBATCH; j++) {
+                    if(i * MAXBATCH + j >= NTRAIN) {
+                        continue;
+                    }
+                    for(int k = 0; k < NFEATMAX; k++) {
+                        impu::UnrolledLoop<npipes>([&] (auto l) {
+                            toEncode::PipeAt<l>::write(localInput[j][k]);
+                        });
+                    }
                 }
+                
             }
         });
     });
@@ -320,7 +294,6 @@ void encode(queue &q, float *bases) {
     q.submit([&](auto &h) {
         h.template single_task<encodeKernel<pipeId>>([=]() [[intel::kernel_args_restrict]] {
             float localBases[K][NFEATMAX];
-            
             for(int ij = 0, i = 0, j = 0; ij < K * NFEATMAX; ij++) {
                 localBases[i][j] = bases[pipeId * K * NFEATMAX + ij];
                 j++;
@@ -329,7 +302,7 @@ void encode(queue &q, float *bases) {
                     j = 0;
                 }
             }
-            for(int i = 0; i < MAXBATCH; i++) {
+            for(int i = 0; i < NTRAIN; i++) {
                 float data[NFEATMAX];
                 for(int j = 0; j < NFEATMAX; j++) {
                     data[j] = toEncode::PipeAt<pipeId>::read();
@@ -337,7 +310,6 @@ void encode(queue &q, float *bases) {
                 float output[K];
                 for(int j = 0; j < K; j++) {
                     float sum = 0.0f;
-                    #pragma unroll 16
                     for(int k = 0; k < NFEATMAX; k++) {
                         sum += localBases[j][k] * data[k];
                     }
@@ -352,72 +324,33 @@ void encode(queue &q, float *bases) {
 }
 
 template<int pipeId> 
-void bundle(queue &q, float *classes) {
+void bundle(queue &q, float *classes, int *labels) {
     q.submit([&](auto &h) {
         h.template single_task<bundler<pipeId>>([=]() [[intel::kernel_args_restrict]] {
             float localClasses[NCLASSMAX][K];
-            
+            int localLabels[NTRAIN];
+            for(int i = 0; i < NTRAIN; i++) {
+                localLabels[i] = labels[i];
+            }
             for(int i = 0; i < NCLASSMAX; i++) {
                 for(int j = 0; j < K; j++) {
-                    localClasses[i][j] = classes[i * DMAX + pipeId * K + j];
+                    localClasses[i][j] = 0.0f;
                 }
             }
-            for(int i = 0; i < MAXBATCH; i++) {
+            for(int i = 0; i < NTRAIN; i++) {
                 float encoded[K];
                 for(int j = 0; j < K; j++) {
                     encoded[j] = toClassify::PipeAt<pipeId>::read();
                 }
-                float max[NCLASSMAX];
-                for(int k = 0; k < NCLASSMAX; k++) {
-                    float sum = 0.0f;
-                    for(int j = 0; j < K; j++) {
-                        sum += localClasses[k][j] * encoded[j];
-                    }
-                    max[k] = sum;
-                }
-                for(int j = 0; j < NCLASSMAX; j++) {
-                    toConsume::PipeAt<pipeId>::write(max[j]);
+                int index = localLabels[i];
+                for(int j = 0; j < K; j++) {
+                    localClasses[index][j] += encoded[j];
                 }
             }
-
-        });
-    });
-}
-
-template<int npipes>
-void consume(queue &q, int *output, int numData) {
-    const int numBatches = NTRAIN / MAXBATCH + 1;
-    q.submit([&](auto &h) { 
-        h.template single_task<consumer>([=]() [[intel::kernel_args_restrict]] {
-            int localOutput[MAXBATCH];
-            
-            for(int j = 0; j < MAXBATCH; j++) {
-                    float maxes[npipes][NCLASSMAX];
-                    impu::UnrolledLoop<npipes>([&maxes] (auto l) {
-                        for(int i = 0; i < NCLASSMAX; i++) {
-                            maxes[l][i] = toConsume::PipeAt<l>::read();
-                        }
-                    });
-                    float max[NCLASSMAX];
-                    for(int i = 0; i < NCLASSMAX; i++) {
-                        float sum = 0.0f;
-                        for(int k = 0; k < npipes; k++) {
-                            sum += maxes[k][i];
-                        }
-                        max[i] = sum;
-                    }
-                    float totalMax = 0.0;
-                    int maxInd = 0;
-                    for(int i = 0; i < NCLASSMAX; i++) {
-                        if(max[i] > totalMax) {
-                            totalMax = max[i];
-                            maxInd = i;
-                        }
-                    }
-                    localOutput[j] = maxInd;
-            }
-            for(int i = 0; i < MAXBATCH; i++) {
-                output[i] = localOutput[i];
+            for(int i = 0; i < NCLASSMAX; i++) {
+                for(int j = 0; j < K; j++) {
+                    classes[i * DMAX + pipeId * K + j] = localClasses[i][j];
+                }
             }
         });
     });
@@ -439,7 +372,7 @@ void initialize(float *bases, float *classes, float *data, int numFeats, int num
         bases[i] = d(gen);
     }
     for(int i = 0; i < numClass * numDim; i++) {
-        classes[i] = d(gen);
+        classes[i] = 0.0;
     }
     for(int i = 0; i < numData * numFeats; i++) {
         data[i] = d(gen);
@@ -494,7 +427,6 @@ int main(int argc, char *argv[]) {
     float *deviceData = malloc_device<float>(numBatches * batch * numFeats, q);
     float *intermeds1 = malloc_device<float>(batch * numDim, q);
     float *intermeds2 = malloc_device<float>(batch * numDim, q);
-    int *preds = malloc_device<int>(batch, q);
     int *deviceLabels = train.labels;
     
     auto copyStart = high_resolution_clock::now();
@@ -505,35 +437,43 @@ int main(int argc, char *argv[]) {
     int cur = 0;
     impu::UnrolledLoop<numPipes>([&](auto index) {
         encode<index>(q, deviceBases);
-        bundle<index>(q, deviceClasses);
+        bundle<index>(q, deviceClasses, deviceLabels);
     });
     auto start = high_resolution_clock::now();
     produce<numPipes>(q, deviceData, numData, numFeats);
-    consume<numPipes>(q, preds, numData);
     q.wait();
-    
+    q.memcpy(classes, deviceClasses,  sizeof(float) * numClasses * numDim).wait();
+    normalizeClasses(classes, numClasses, numDim);
     auto end = high_resolution_clock::now();
     
     printf("TIME: %f\n", elapsedTime(start, end));
     
-    int *hostPreds = static_cast<int *>(malloc(sizeof(int) * batch));
-    q.memcpy(hostPreds, preds, sizeof(int) * batch).wait();
-    validateInference(bases, classes, train.data, hostPreds, batch, numDim, numFeats, numClasses);
-        
+    q.memcpy(bases, deviceBases, sizeof(float) * numFeats * numDim).wait();
+    float *referenceClasses = static_cast<float *>(malloc(sizeof(float) * numClasses * numDim));
+    int *labels = static_cast<int *>(malloc(sizeof(int) * numData));
+    q.memcpy(labels, train.labels, sizeof(int) * numData).wait();
+    validateBundling(classes, referenceClasses, bases, train.data, labels, numDim, numData, numClasses, numFeats);
+    char* testFile = strdup("UCIHAR_test.choir_dat");
+	Data test = readData(testFile, q);
+    int *localLabels = static_cast<int *>(malloc(sizeof(int) * test.data.size()));
+    q.memcpy(localLabels, test.labels, sizeof(int) * test.data.size()).wait();
+    int correct = infer(bases, classes, test.data, localLabels, numFeats, numDim, numClasses);
+    printf("accuracy: %f\n", ((float) correct) / ((float) test.data.size()));
     sycl::free(deviceBases, q);
     sycl::free(deviceClasses, q);
     sycl::free(deviceData, q);
     sycl::free(intermeds1, q);
     sycl::free(intermeds2, q);
     sycl::free(deviceLabels, q);
-    sycl::free(preds, q);
-    
+    sycl::free(test.labels, q);
+
     free(bases);
     free(classes);
     free(data);
+    free(localLabels);
     free(tempEncoded);
     free(localClasses);
-    free(hostPreds);
-
+    free(referenceClasses);
+    free(labels);
     return 0;
 }
