@@ -506,7 +506,7 @@ void testNN(fbuf &data, ivec &labels, int &correct){
         accessor label_a(label_buf, h, read_only);
         accessor correct_a(correct_buf, h, read_write);
 
-        auto sums = ext::oneapi::reduction(correct_a, ext::oneapi::plus<>());
+        auto sums = reduction(correct_buf,h,plus<>());
 
         int nclasses_ = nclasses;
         int ndata_ = ndata;
