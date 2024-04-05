@@ -1,4 +1,4 @@
 #!/bin/bash
-source /glob/development-tools/versions/oneapi/2022.3.1/oneapi/setvars.sh --force
+source /opt/intel/oneapi/setvars.sh > /dev/null 2>&1
 make clean all
 /bin/echo "DONE"
