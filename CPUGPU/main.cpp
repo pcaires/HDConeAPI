@@ -663,12 +663,12 @@ void trainAndTestWithRegen(){
     work_group_size = q->get_device().get_info<info::device::max_work_group_size>();
     cout << work_group_size << std::endl;
     cout << "reading files... " << std::endl;
-	char *testFile = strdup("UCIHAR_test.choir_dat");
+	char *testFile = strdup("data/mnist_test.choir_dat");
 	Data test = readData(testFile);
 	fvec test_data = m2v(test.data);
 	ivec test_labels = test.labels;
 
-	char* trainFile = strdup("UCIHAR_train.choir_dat");
+	char* trainFile = strdup("data/mnist_train.choir_dat");
 	Data train = readData(trainFile);
     fvec train_data = m2v(train.data);
 	ivec train_labels = train.labels;
@@ -789,12 +789,12 @@ void trainAndTestOneShot(){
     work_group_size = q->get_device().get_info<info::device::max_work_group_size>();
 
     cout << "reading files... " << std::endl;
-	char *testFile = strdup("UCIHAR_test.choir_dat");
+	char *testFile = strdup("data/mnist_test.choir_dat");
 	Data test = readData(testFile);
 	fvec test_data = m2v(test.data);
 	ivec test_labels = test.labels;
 
-	char* trainFile = strdup("UCIHAR_train.choir_dat");
+	char* trainFile = strdup("data/mnist_train.choir_dat");
 	Data train = readData(trainFile);
     fvec train_data = m2v(train.data);
 	ivec train_labels = train.labels;
@@ -884,12 +884,12 @@ void testInferenceBaseline(){
     work_group_size = q->get_device().get_info<info::device::max_work_group_size>();
 
     cout << "reading files... " << std::endl;
-	char *testFile = strdup("UCIHAR_test.choir_dat");
+	char *testFile = strdup("data/mnist_test.choir_dat");
 	Data test = readData(testFile);
 	fvec test_data = m2v(test.data);
 	ivec test_labels = test.labels;
 
-	char* trainFile = strdup("UCIHAR_train.choir_dat");
+	char* trainFile = strdup("data/mnist_train.choir_dat");
 	Data train = readData(trainFile);
     fvec train_data = m2v(train.data);
 	ivec train_labels = train.labels;
