@@ -16,12 +16,7 @@
 // (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY
 // OF SUCH DAMAGE.
 #include <CL/sycl.hpp>
-#include <oneapi/dpl/random>
-#include <oneapi/dpl/algorithm>
-#include <oneapi/dpl/iterator>
 #include <iostream>
-#include <string>
-#include <random>
 #include <numeric>
 #include <cmath>
 #include <fstream>
@@ -30,10 +25,6 @@
 #include <vector>
 #include <ctime>
 #include <algorithm>
-#include <mkl.h>
-#include <oneapi/mkl/blas.hpp>
-#include "oneapi/mkl/types.hpp"
-#include "oneapi/mkl/vm.hpp"
 #include <stdlib.h>     /* srand, rand */
 #include <time.h>       /* time */
 
@@ -41,22 +32,15 @@
 #define FOR(i,n) for(int i = 0; i < n; i++)
 #define FORX(it,iterable) for(auto &it : iterable)
 
-using namespace sycl;
-
-using std::cout;
+using namespace cl::sycl;
 
 //typedefs
 typedef std::vector<std::vector<float>> fmat;
 typedef std::vector<float> fvec;
 typedef std::vector<int> ivec;
-
-typedef sycl::buffer<float> fbuf;
-typedef sycl::buffer<int> ibuf;
-
+typedef cl::sycl::buffer<int> ibuf;
+typedef cl::sycl::buffer<float> fbuf;
 typedef std::chrono::high_resolution_clock::time_point timep;
-
-#define MTRANS oneapi::mkl::transpose::trans
-#define MNOTRANS oneapi::mkl::transpose::nontrans
 
 typedef struct{
     fmat data;
@@ -65,60 +49,22 @@ typedef struct{
     int32_t numClasses;
 } Data;
 
-//prototypes
-double elapsedTime(timep start, timep end);
-fvec normalize(fvec input);
-Data readData(const char *filename);
-void trainAndTestOneShot();
-void trainAndTestWithRegen();
-void testInferenceBaseline();
-
-//performs matrix mult C = A * trans(B)
-//where d1 is rows of A, d2 is cols A or rows B, d3 is cols B
-void mmult(fbuf &A, fbuf &B, fbuf &C, int d1, int d2, int d3);
-
-//generate random basis matrix for conversion into hyper-space
-//matrix mult basis with data_buf -> out_buf
-//out_buf is data_buf vectors in hyperspace
-void encode(fbuf &data_buf, fbuf &out_buf, int ndata);
-
-//X = classes * trans(data)
-//classes: 1 class per row, dim cols
-//data: ndata per row, dim cols... trans(data): dim rows, ndata cols    
-//X: nclasses rows, ndata cols
-//rows of X are now data points dotted with classes
-//X(row,col) = data[row] closeness to class[col]
-//guesses = argmax of each row
-//correct = number of matches between guesses and labels
-//ALSO for each data point assigned incorrectly update:
-//adjust correct class add mislabeled data * step size
-//adjust incorrect class subtract mislabeled data * step size
-void fit(fbuf &data, ivec &labels, int &correct);
-void fit2(fbuf &data, ivec &labels, int &correct);
-//slightly different, bundles classes instead
-void fitOneShot(fbuf &data, ivec &labels, int &correct);
-
-//same as fit, just dont update
-void testNN(fbuf &data, ivec &labels, int &correct);
-void testNN2(fbuf &data, ivec &labels, int &correct);
-
-//ranks 
-ivec rankDims();
-
-void updateClassesAndBasis(ivec &dim_ranks);
 
 //global variables
-static int32_t nfeatures, nclasses, ndims, work_group_size;
+static const int32_t ndims = 2000;
+static const float alpha = 0.037;
+static int32_t nfeatures, nclasses, work_group_size;
 static fvec basisv, classesv;
 static fbuf *basis_bufp = nullptr, *classes_bufp = nullptr;
 static queue *q = nullptr;
 static fvec accuracies, inference_times, train_times, runtimes;
 
-timep tstart, tend;
+static double test_times[2];
+static timep tstart, tend;
 
 default_selector d_selector;
 
-static auto e_handler = [](sycl::exception_list e_list) {
+static auto e_handler = [](exception_list e_list) {
   for (std::exception_ptr const &e : e_list) {
     try {
       std::rethrow_exception(e);
@@ -130,52 +76,6 @@ static auto e_handler = [](sycl::exception_list e_list) {
   }
 };
 
-int main(int argc, char **argv){
-	ndims = 2000;
-	if(argc > 1) {
-		ndims = atoi(argv[1]);
-	}
-    std::cout << "Starting inference only: " << ndims << std::endl;
-    trainAndTestWithRegen();
-    testInferenceBaseline();
-    return 0;
-}
-//entry point
-int main2(int argc, char **argv){
-	ndims = 2000;
-	if(argc > 1) {
-		ndims = atoi(argv[1]);
-	}
-    std::cout << "Starting main with dim: " << ndims << std::endl;
-    FOR(i,10) {
-        ndims = 2000;
-        cout << std::endl <<  "TRIAL " << i << ": " << std::endl;
-        //trainAndTestOneShot();
-        trainAndTestWithRegen();
-        FOR(x,15) cout << classesv[x] << "  ";
-        delete basis_bufp; basis_bufp = nullptr;
-        delete classes_bufp; classes_bufp = nullptr;
-        delete q; q = nullptr;
-    }
-    std::cout << "Ending main! YAY!" << std::endl;
-
-    float average_train_time = 0.0;
-    for (auto &x : train_times) average_train_time += x;
-    average_train_time /= (float)10;
-    float average_accuracy = 0.0;
-    for (auto &x : accuracies) average_accuracy += x;
-    average_accuracy /= (float)10;
-    std::cout << std::endl;
-    std::cout << "Train times:" << std::endl;
-    for (auto &x : train_times) cout << x << std::endl;
-    std::cout << "Average train time: " << average_train_time << std::endl;
-    std::cout << std::endl;
-    std::cout << "Accuracies:" << std::endl;
-    for (auto &x : accuracies) cout << x << std::endl;
-    std::cout << "Average accuracy: " << average_accuracy << std::endl;
-
-    return 0;
-}
 
 double elapsedTime(timep start, timep end) {
 	std::chrono::duration<double> time_span = std::chrono::duration_cast<std::chrono::duration<double> >(end - start);
@@ -201,21 +101,30 @@ fvec m2v(fmat in){
     return out;
 }
 
-void mmult(fbuf &A, fbuf &B, fbuf &C, int d1, int d2, int d3){
-    oneapi::mkl::blas::row_major::gemm( *q,
-                                        MNOTRANS,
-                                        MTRANS,
-                                        d1,
-                                        d2,
-                                        d3,
-                                        1.0,
-                                        A,
-                                        d3,
-                                        B,
-                                        d3,
-                                        0,
-                                        C,
-                                        d2);
+void encode(fbuf &data_buf, fbuf &out_buf, const size_t ndata){
+
+    if (out_buf.get_range()[0] != ndata*ndims)
+        throw std::runtime_error("Dimesions do not match " + std::to_string(out_buf.get_range()[0]/ndims) + " " + std::to_string(data_buf.get_range()[0]/(nfeatures)));
+
+    if (data_buf.get_range()[0] != ndata*nfeatures)
+        throw std::invalid_argument("data buff size does not match expected size: " + std::to_string(ndata*nfeatures) + " got instead:" + std::to_string(data_buf.get_range()[0]));
+
+    q->submit([&](handler &cgh) {
+        auto C_acc = out_buf.get_access(cgh,write_only,no_init);
+        auto A_acc = data_buf.get_access(cgh,read_only);
+        auto B_acc = basis_bufp->get_access(cgh,read_only);
+
+        cgh.parallel_for(
+            range<2>{ndata, ndims}, [=](id<2> item) {
+                const int dt_point = item[0];
+                const int dim = item[1];
+                float result = 0;
+                for (int i = 0; i < nfeatures; i++) 
+                    result += A_acc[dt_point * nfeatures + i] * B_acc[i * ndims + dim];
+    
+                C_acc[dt_point * ndims + dim] = 0;//cl::sycl::cos(result);
+            });
+    });
 }
 
 Data readData(char *filename) {
@@ -260,21 +169,15 @@ Data readData(char *filename) {
     return ret;
 }
 
-void encode(fbuf &data_buf, fbuf &out_buf, int ndata){
-    mmult(data_buf, *basis_bufp, out_buf, ndata, ndims, nfeatures);
-    q->wait();
-    oneapi::mkl::vm::cos(*q, ndata*ndims, out_buf, out_buf);
-    q->wait();
-}
 
 int cpuFit(fbuf &dataBuf, ivec &labels, fvec &classes) {
-    sycl::host_accessor data(dataBuf);
+    host_accessor data(dataBuf,read_only);
     int correct = 0;
     ivec guesses(labels.size(), 0);
-    for(int i = 0; i < labels.size(); i++) {
+    FOR(i, labels.size()) {
         float max = 0.0f;
         int guess = 0;
-        for(int j = 0; j < nclasses; j++) {
+        FOR(j, nclasses){
             float sum = 0.0f;
             for(int k = 0; k < ndims; k++) {
                 sum += classes[j * ndims + k] * data[i * ndims + k];
@@ -289,247 +192,13 @@ int cpuFit(fbuf &dataBuf, ivec &labels, fvec &classes) {
             correct ++;
         }
         else {
-            for(int j = 0; j < ndims; j++) { 
+            FOR(j, ndims){
                 classes[guess * ndims + j] -= 0.037 * data[i * ndims + j];
                 classes[labels[i] * ndims + j] += 0.037 * data[i * ndims + j];
             }
         }
     }
-//     for(int i = 0; i < labels.size(); i++) {
-//         if(guesses[i] != labels[i]) {
-//             for(int j = 0; j < ndims; j++) {
-//                 classes[guesses[i] * ndims + j] -= 0.037 * data[i * ndims + j];
-//                 classes[labels[i] * ndims + j] += 0.037 * data[i * ndims + j];
-//             }
-//         }
-//         else {
-//             correct++;
-//         }
-//     }
     return correct;
-}
-
-void fit(fbuf &data, ivec &labels, int &correct){
-    ivec indexes(labels.size());
-    FOR(i, labels.size()) indexes[i] = i;
-    srand(time(0));
-    std::random_shuffle(indexes.begin(), indexes.end());
-
-    int group_size = 1;
-    int ndata = labels.size();
-
-    ivec guesses(ndata);
-    ibuf guesses_buf(guesses);
-    ibuf label_buf(labels);
-    ibuf indexes_buf(indexes);
-    fvec classes_pre_norm(nclasses * ndims, 0.0);
-    fbuf classes_pre_norm_buf(classes_pre_norm);
-    q->submit([&](auto &h){
-        accessor label_a(label_buf, h, read_only);
-        accessor data_a(data, h, read_only);
-        accessor class_a(*classes_bufp, h, read_only);
-        accessor indexes_a(indexes_buf, h, read_only);
-        accessor guesses_a(guesses_buf, h, write_only);
-        
-        int ndims_ = ndims;
-        int nclasses_ = nclasses;
-        int ndata_ = ndata;
-
-        h.parallel_for(range(ndata_), [=](auto i){
-            float max = -1.0;
-            int guess = -1;
-            int index = indexes_a[i[0]];
-            FOR(j, nclasses_){
-                float cum = 0;
-                FOR(k, ndims_){
-                    cum += data_a[index*ndims_+k] * class_a[j*ndims_+k];
-                }
-                if(cum > max){
-                    max = cum;
-                    guess = j;
-                }
-            }
-            guesses_a[index] = guess;
-        });
-    });
-    q->wait();
-    q->submit([&](auto &h){
-        accessor label_a(label_buf, h, read_only);
-        accessor data_a(data, h, read_only);
-        accessor indexes_a(indexes_buf, h, read_only);
-        accessor guesses_a(guesses_buf, h, read_only);
-        accessor class_a(*classes_bufp, h, read_write);
-        
-        int ndims_ = ndims;
-        int nclasses_ = nclasses;
-        int ndata_ = ndata;
-        float step = 0.037;
-
-        h.parallel_for(range(ndims_), [=](auto dim){
-            FOR(i,ndata_){
-                int index = indexes_a[i];
-                if (label_a[index] != guesses_a[index]){
-                    class_a[ndims_*guesses_a[index]+dim[0]] -= data_a[ndims_*index+dim[0]] * step;
-                    class_a[ndims_*label_a[index]+dim[0]] += data_a[ndims_*index+dim[0]] * step;
-                }
-            }
-        });
-    });
-    q->wait();
-//     q->submit([&](auto &h){
-//         accessor classes_pre_norm_a(classes_pre_norm_buf, h, read_only);
-//         accessor class_a(*classes_bufp, h, read_write);
-        
-//         int ndims_ = ndims;
-//         int nclasses_ = nclasses;
-//         int ndata_ = ndata;
-
-//         h.parallel_for(range(nclasses_), [=](auto index){
-//             float sum = 0.0;
-//             int c = index[0];
-//             FOR(i, ndims_){
-//                 float val = classes_pre_norm_a[c * ndims_ + i];
-//                 sum += val * val;
-//             }
-//             float invmag = (float)1.0 / sqrtf(sum);
-//             FOR(i, ndims_){
-//                 class_a[c * ndims_ + i] = classes_pre_norm_a[c * ndims_ + i] * invmag;
-//             }
-//         });
-//     });
-//     q->wait();
-    //maybe calculate accuracy
-}
-
-void fit2(fbuf &data, ivec &labels, int &correct){
-    ivec indexes(labels.size());
-    FOR(i, labels.size()) indexes[i] = i;
-    srand(time(0));
-    std::random_shuffle(indexes.begin(), indexes.end());
-    //X = classes * trans(data)
-    //classes: 1 class per row, dim cols
-    //data: ndata per row, dim cols... trans(data): dim rows, ndata cols
-    //X: nclasses rows, ndata cols
-    //rows of X are now data points dotted with classes
-    //X(row,col) = data[row] closeness to class[col]
-    //guesses = argmax of each row
-    //correct = number of matches between guesses and labels
-    //ALSO for each data point assigned incorrectly update:
-    //adjust correct class add mislabeled data * step size
-    //adjust incorrect class subtract mislabeled data * step size
-    /*
-    q->submit([&](auto &h){
-        accessor label_a(label_buf, h, read_only);
-        h.single_task([=](){
-        });
-    });
-    q->wait();
-    */
-}
-
-void fitOneShot(fbuf &data, ivec &labels, int &correct){
-    int ndata = labels.size();
-
-    ibuf label_buf(labels);
-    fvec classes_pre_norm(nclasses * ndims, 0.0);
-    fbuf classes_pre_norm_buf(classes_pre_norm);
-    q->submit([&](auto &h){
-        accessor data_a(data, h, read_only);
-        accessor label_a(label_buf, h, read_only);
-        accessor classes_pre_norm_a(classes_pre_norm_buf, h, read_write);
-
-        int nclasses_ = nclasses;
-        int ndata_ = ndata;
-        int ndims_ = ndims;
-
-        h.parallel_for(range(ndims_), [=](auto dim){
-            FOR(c, nclasses_){
-                FOR(dat, ndata_){
-                    if (label_a[dat] == c){
-                        classes_pre_norm_a[c * ndims_ + dim] += data_a[dat * ndims_ + dim];
-                    }
-                }
-            }
-        });
-    });
-    cout << "submit 1" << std::endl;
-    q->wait();
-    cout << "submit 1 done" << std::endl;
-    q->submit([&](auto &h){
-        accessor classes_pre_norm_a(classes_pre_norm_buf, h, read_only);
-        accessor class_a(*classes_bufp, h, write_only);
-
-        int nclasses_ = nclasses;
-        int ndata_ = ndata;
-        int ndims_ = ndims;
-
-        h.parallel_for(range(nclasses_), [=](auto c){
-            float sum = 0.0;
-            FOR(i, ndims_){
-                float val = classes_pre_norm_a[c * ndims_ + i];
-                sum += val * val;
-            }
-            float invmag = (float)1.0 / sqrtf(sum);
-            FOR(i, ndims_){
-                class_a[c * ndims_ + i] = classes_pre_norm_a[c * ndims_ + i] * invmag;
-            }
-        });
-    });
-    cout << "submit 2" << std::endl;
-    q->wait();
-    cout << "submit 2 done" << std::endl;
-    // FOR(i, 15){
-    //     cout << classes_pre_norm[i] << " " << classesv[i] << std::endl;
-    // }
-    // cout << std::endl;
-}
-
-double test_times[2];
-void testNN(fbuf &data, ivec &labels, int &correct){
-    int ndata = labels.size();
-    fvec intermed(ndata * nclasses, 0);
-    fbuf intermed_buf(intermed);
-    ibuf correct_buf(&correct, 1);
-    ibuf label_buf(labels);
-    auto t1 = TIME;
-    mmult(data, *classes_bufp, intermed_buf, ndata, nclasses, ndims);
-    q->wait();
-    test_times[0] += elapsedTime(t1,TIME);
-    int group_size = q->get_device().get_info<info::device::max_work_group_size>();
-    int num_items = ndata;
-    if (ndata % group_size != 0){
-        num_items += group_size - (ndata % group_size);
-    }
-    t1 = TIME;
-    q->submit([&](auto &h){
-        accessor intermed_a(intermed_buf, h, read_only);
-        accessor label_a(label_buf, h, read_only);
-        accessor correct_a(correct_buf, h, read_write);
-
-        auto sums = reduction(correct_buf,h,plus<>());
-
-        int nclasses_ = nclasses;
-        int ndata_ = ndata;
-
-        h.parallel_for(nd_range<1>(num_items, group_size), sums, [=](auto item, auto &sum_arg){
-            size_t global_id = item.get_global_id(0);
-
-            if(global_id < ndata_) {
-                float max = -1.0;
-                int guess = -1;
-                for (int i = 0; i < ndata_; i++){
-                    float temp = intermed_a[global_id * ndata_ + i];
-                    if(temp > max) {
-                        max = temp;
-                        guess = i;
-                    }
-                }
-                sum_arg += (int)(guess == label_a[global_id]);
-            }
-        });
-    });
-    q->wait();
-    test_times[1] += elapsedTime(t1,TIME);
 }
 
 void testNN2(fbuf &data, ivec &labels, int &correct){
@@ -545,19 +214,15 @@ void testNN2(fbuf &data, ivec &labels, int &correct){
         accessor data_a(data, h, read_only);
         accessor class_a(*classes_bufp, h, read_only);
         accessor correct_a(correct_buf, h, read_write);
-        
-        int ndims_ = ndims;
-        int nclasses_ = nclasses;
-        int ndata_ = ndata;
 
-        h.parallel_for(range(ndata_), [=](auto i){
+        h.parallel_for(range(ndata), [=](auto i){
             float max = -1.0;
             int guess = -1;
             int index = i[0];
-            FOR(j, nclasses_){
+            FOR(j, nclasses){
                 float cum = 0;
-                FOR(k, ndims_){
-                    cum += data_a[index*ndims_+k] * class_a[j*ndims_+k];
+                FOR(k, ndims){
+                    cum += data_a[index*ndims+k] * class_a[j*ndims+k];
                 }
                 if(cum > max){
                     max = cum;
@@ -570,13 +235,10 @@ void testNN2(fbuf &data, ivec &labels, int &correct){
         });
     });
     q->wait();
+
     q->submit([&](auto &h){
         accessor correct_a(correct_buf, h, read_only);
         accessor correct_a_out(correct_buf_single, h, read_write);
-        
-        int ndims_ = ndims;
-        int nclasses_ = nclasses;
-        int ndata_ = ndata;
 
         h.single_task([=](){
             FOR(i, ndata) correct_a_out[0] += correct_a[i];
@@ -585,6 +247,13 @@ void testNN2(fbuf &data, ivec &labels, int &correct){
     q->wait();
 }
 
+/**
+ * @brief A function that calculates the variance of each dimension and 
+ * returns the indexes in ascending order of variance.
+ *
+ * 
+ * @return ivec (lowest variance dim index -> highest variance dim index)
+ */
 ivec rankDims(){
     fvec variances(ndims);
     fbuf *var_buf = new fbuf(variances);
@@ -592,22 +261,23 @@ ivec rankDims(){
     std::iota(sorted_indexes.begin(), sorted_indexes.end(), 0);
     ibuf sorted_indexes_buf(sorted_indexes);
 
+    // SYCL kernel to calculate vaiances
     q->submit([&](auto &h){
         accessor class_a(*classes_bufp, h, read_only);
         accessor var_a(*var_buf, h, write_only);
 
-        int ndims_ = ndims;
+       
         int nclasses_ = nclasses;
 
-        h.parallel_for(range(ndims_), [=](auto index){
+        h.parallel_for(range(ndims), [=](auto index){
             int d = index[0];
             float mean=(float)0, sum=(float)0;
             FOR(c, nclasses_){
-                mean += class_a[c*ndims_+d];
+                mean += class_a[c*ndims+d];
             }
             mean *= (float)1 / (float)nclasses_;
             FOR(c, nclasses_){
-                float temp = class_a[c*ndims_+d] - mean;
+                float temp = class_a[c*ndims+d] - mean;
                 sum += temp*temp;
             }
             var_a[d] = sum;
@@ -615,41 +285,46 @@ ivec rankDims(){
     });
     q->wait();
     delete var_buf; var_buf = nullptr;
-    //sort indeces in descending order
+
+    //sort indeces in ascending order
     std::sort(sorted_indexes.begin(), sorted_indexes.end(),
         [&](int i, int j){ return (variances[i] < variances[j]); });
+        
     return sorted_indexes;
 }
 
-void updateClassesAndBasis(ivec &dim_ranks){
-    int dim_loss = dim_ranks.size();
-    ibuf dim_ranks_buf(dim_ranks);
+/**
+ * @brief Update Classes and Basis Vectors
+ * 
+ * @param dim_ranks Highes variance dimesion indexes
+ */
+void updateClassesAndBasis(const ivec &dim_ranks){
+
+    const int dim_loss = dim_ranks.size();
     
     srand (time(NULL));
     int seed = rand();
-    q->submit([&](auto &h){
-        accessor basis_a(*basis_bufp, h, read_write);
-        accessor dim_ranks_a(dim_ranks_buf, h, read_only);
+    host_accessor basis_a(*basis_bufp, read_write);
 
-        int nfeatures_ = nfeatures;
-        int ndims_ = ndims;
+    int nfeatures_ = nfeatures;
 
-        h.parallel_for(range(nfeatures_, dim_loss), [=](auto index){
-			std::uint64_t offset = index.get_linear_id();
-			oneapi::dpl::minstd_rand engine(seed, offset);
-			oneapi::dpl::normal_distribution<float> distr;
-			basis_a[index[0]*ndims_ + dim_ranks_a[index[1]]] = distr(engine);
-        });
-    });
+    std::mt19937 rng(seed);
+    std::normal_distribution<float> gen{0,1};
+
+    FOR(i, nfeatures_)
+        FOR(j, dim_loss)
+            basis_a[i*ndims + dim_ranks[j]] = gen(rng);
+
+    ibuf dim_ranks_buf(dim_ranks);
+
     q->submit([&](auto &h){
         accessor class_a(*classes_bufp, h, read_write);
         accessor dim_ranks_a(dim_ranks_buf, h, read_only);
 
         int nclasses_ = nclasses;
-        int ndims_ = ndims;
 
         h.parallel_for(range(nclasses_, dim_loss), [=](auto index){
-            class_a[index[0]*ndims_ + dim_ranks_a[index[1]]] = (float)0;
+            class_a[index[0]*ndims + dim_ranks_a[index[1]]] = (float)0;
         });
     });
     q->wait();
@@ -657,12 +332,12 @@ void updateClassesAndBasis(ivec &dim_ranks){
 
 void trainAndTestWithRegen(){
     
-    cout << "Enter function with dim: " << ndims << std::endl;
+    std::cout << "Enter function with dim: " << ndims << std::endl;
     q = new queue(d_selector, e_handler);
-    cout << "Hardware: " << q->get_device().get_info<info::device::name>() << std::endl;
+    std::cout << "Hardware: " << q->get_device().get_info<info::device::name>() << std::endl;
     work_group_size = q->get_device().get_info<info::device::max_work_group_size>();
-    cout << work_group_size << std::endl;
-    cout << "reading files... " << std::endl;
+    std::cout << work_group_size << std::endl;
+    std::cout << "reading files... " << std::endl;
 	char *testFile = strdup("data/mnist_test.choir_dat");
 	Data test = readData(testFile);
 	fvec test_data = m2v(test.data);
@@ -672,53 +347,51 @@ void trainAndTestWithRegen(){
 	Data train = readData(trainFile);
     fvec train_data = m2v(train.data);
 	ivec train_labels = train.labels;
-    cout << "success!" << std::endl;
+    std::cout << "success!" << std::endl;
     
 	nclasses = test.numClasses;
 	nfeatures = test.numFeatures;
 
-    cout << "allocate basis and class bufs" << std::endl;
-    basisv = fvec(nfeatures*ndims, 0.0);
-    basis_bufp = new fbuf(basisv);
+    std::cout << "allocate basis and class (modified)" << std::endl;
+    basisv = fvec(nfeatures*ndims);
     classesv = fvec(nclasses*ndims, 0.0);
-    classes_bufp = new fbuf(classesv);
 
-    cout << "generate basis: " << nfeatures << " " << ndims << std::endl;
+    std::cout << "generate basis: " << nfeatures << " " << ndims << std::endl;
     //generate basis
     tstart = TIME;
     srand (time(NULL));
     int seed = rand();
-    q->submit([&](auto &h){
-		accessor acc(*basis_bufp, h, write_only);
-		h.parallel_for(range(nfeatures*ndims), [=](auto index) {
-			std::uint64_t offset = index.get_linear_id();
-			oneapi::dpl::minstd_rand engine(seed, offset);
-			oneapi::dpl::normal_distribution<float> distr;
-			float res = distr(engine);
-			acc[index] = res;
-		});
-	});
-	q->wait();
-    tend = TIME;
-    cout << "generate basis time: " << elapsedTime(tstart, tend) << std::endl;
 
-    int ndata_train = train_labels.size();
+
+    std::mt19937 rng(seed);
+    std::normal_distribution<float> gen;
+
+    FOR(i, nfeatures*ndims)
+        basisv[i] = gen(rng);
+
+    tend = TIME;
+    std::cout << "generate basis time: " << elapsedTime(tstart, tend) << std::endl;
+    
+    basis_bufp = new fbuf(basisv);
+    classes_bufp = new fbuf(classesv);
+
+    const int ndata_train = train_labels.size();
     fvec train_data_encoded(ndata_train * ndims, 0);
     fbuf train_data_buf(train_data);
     fbuf train_data_encoded_buf(train_data_encoded);
-    int ndata_test = test_labels.size();
+    const int ndata_test = test_labels.size();
     fvec test_data_encoded(ndata_test * ndims, 0);
     fbuf test_data_buf(test_data);
     fbuf test_data_encoded_buf(test_data_encoded);
     tstart = TIME;
     encode(train_data_buf, train_data_encoded_buf, ndata_train);
-    cout << "encode training data: " << elapsedTime(tstart, TIME) << std::endl;
+    std::cout << "encode training data: " << elapsedTime(tstart, TIME) << std::endl;
     tstart = TIME;
     encode(test_data_buf, test_data_encoded_buf, ndata_test);
-    cout << "encode testing data: " << elapsedTime(tstart, TIME) << std::endl;
+    std::cout << "encode testing data: " << elapsedTime(tstart, TIME) << std::endl;
 
-	int regen = 200; // number of regen iterations
-	int interim = 5; // number of iters between regens
+	int regen = 0;//200; // number of regen iterations
+	int interim = 5; // number of iters between regens (retraining iterations adapthd)
 	double percent_drop = 0.2; // how many dims to regen per regen iter
     
     //ibuf test_label_buf
@@ -732,44 +405,55 @@ void trainAndTestWithRegen(){
     FOR(i, regen){
         //cout << "regen #" << i << ", dims=" << ndims << "   ";
         int test_acc = 0, train_acc = 0;
+        q->wait();
         FOR(j, interim){
             test_acc = 0, train_acc = 0;
-            //hdc.fit(trainOutBuf, trainLabels, trainAcc);
+
             auto t1 = TIME;
-            // fit(train_data_encoded_buf, train_labels, train_acc);
-            //fit(train_data_encoded_buf, train_labels, train_acc);
-            //sycl::host_accessor encodedAcs(train_data_encoded_buf);
+
+            // === This cpufit funcion does the adapthd retraining ===
             train_acc = cpuFit(train_data_encoded_buf, train_labels, testClasses);
+            
+            // Timing
             fit_time += elapsedTime(t1, TIME);
             t1 = TIME;
-            //void test(fbuf &data, ivec &labels, int &correct);
-            //testNN2(test_data_encoded_buf, test_labels, test_acc);
             test_time += elapsedTime(t1, TIME);
-            //if train_acc == ndata_train . . .
-            cout << (float) train_acc / (float) ndata_train << "\n";
-            if (test_acc == ndata_test){
-                i = regen;//super break
-                break;
-            }
+
+            // Output accuracy
+            std::cout << (float) train_acc / (float) ndata_train << "\n";
+
+            // What is the purpose of this 'if'? test_acc is always 0 and ndata_test is constant
+            //if (test_acc == ndata_test){
+            //    i = regen; //super break
+            //    break;
+            //}
         }
+        q->wait();
+
         auto t2 = TIME;
-        cout << test_acc << "   " << train_acc << std::endl;
-        //train data, test data, classes, basis
+        std::cout << test_acc << "   " << train_acc << std::endl;
+
+        // how many dimensions to drop/regen
         int dim_loss = (float)ndims * (float)percent_drop;
+        
+        // Get the ranked dimensions (low var -> high var)
         ivec dim_ranks = rankDims();
+
+        // Resize the ranked dimensions to the n lowest variance
         dim_ranks.resize(dim_loss);
+
         updateClassesAndBasis(dim_ranks);
         encode(train_data_buf, train_data_encoded_buf, ndata_train);
         encode(test_data_buf, test_data_encoded_buf, ndata_test);
         recalc_time += elapsedTime(t2, TIME);
     }
     auto train_time = elapsedTime(tstart, TIME);
-    cout << std::endl;
-    cout << "training time: " << train_time << std::endl;
-    cout << "     fit time: " << fit_time << std::endl;
-    cout << "    test time: " << test_time << std::endl;
-    cout << "  recalc time: " << recalc_time << std::endl;
-    cout << std::endl;
+    std::cout << std::endl;
+    std::cout << "training time: " << train_time << std::endl;
+    std::cout << "     fit time: " << fit_time << std::endl;
+    std::cout << "    test time: " << test_time << std::endl;
+    std::cout << "  recalc time: " << recalc_time << std::endl;
+    std::cout << std::endl;
 
     tstart = TIME;
     int accuracy = 0;
@@ -777,113 +461,18 @@ void trainAndTestWithRegen(){
     accuracies.push_back((float)accuracy / (float)ndata_test);
     train_times.push_back((float)train_time);
     double inference_time = elapsedTime(tstart, TIME);
-    cout << "Inference time: " << inference_time << std::endl;
-    cout << "Accuracy: " << accuracy << " " << accuracies[accuracies.size()-1] << std::endl;
-}
-
-void trainAndTestOneShot(){
-    
-    cout << "Enter function with dim: " << ndims << std::endl;
-    q = new queue(d_selector, e_handler);
-    cout << "Hardware: " << q->get_device().get_info<info::device::name>() << std::endl;
-    work_group_size = q->get_device().get_info<info::device::max_work_group_size>();
-
-    cout << "reading files... " << std::endl;
-	char *testFile = strdup("data/mnist_test.choir_dat");
-	Data test = readData(testFile);
-	fvec test_data = m2v(test.data);
-	ivec test_labels = test.labels;
-
-	char* trainFile = strdup("data/mnist_train.choir_dat");
-	Data train = readData(trainFile);
-    fvec train_data = m2v(train.data);
-	ivec train_labels = train.labels;
-    cout << "success!" << std::endl;
-    
-	nclasses = test.numClasses;
-	nfeatures = test.numFeatures;
-
-    cout << "classes, features: " << nclasses << " " << nfeatures << std::endl;
-
-    cout << "allocate basis and class bufs" << std::endl;
-    basisv = fvec(nfeatures*ndims, 0.0);
-    basis_bufp = new fbuf(basisv);
-    classesv = fvec(nclasses*ndims, 0.0);
-    classes_bufp = new fbuf(classesv);
-
-    cout << "generate basis: " << nfeatures << " " << ndims << std::endl;
-    //generate basis
-    tstart = TIME;
-    srand (time(NULL));
-    int seed = rand();
-    q->submit([&](auto &h){
-		accessor acc(*basis_bufp, h, write_only);
-		h.parallel_for(range(nfeatures*ndims), [=](auto index) {
-			std::uint64_t offset = index.get_linear_id();
-			oneapi::dpl::minstd_rand engine(seed, offset);
-			oneapi::dpl::normal_distribution<float> distr;
-			float res = distr(engine);
-			acc[index] = res;
-		});
-	});
-	q->wait();
-    tend = TIME;
-    cout << "generate basis time: " << elapsedTime(tstart, tend) << std::endl;
-
-
-    int ndata_train = train_labels.size();
-    fvec train_data_encoded(ndata_train * ndims, 0);
-    fbuf train_data_buf(train_data);
-    fbuf train_data_encoded_buf(train_data_encoded);
-    int ndata_test = test_labels.size();
-    fvec test_data_encoded(ndata_test * ndims, 0);
-    fbuf test_data_buf(test_data);
-    fbuf test_data_encoded_buf(test_data_encoded);
-    tstart = TIME;
-    encode(train_data_buf, train_data_encoded_buf, ndata_train);
-    double encode_training_time = elapsedTime(tstart, TIME);
-    cout << "encode training data: " << encode_training_time << std::endl;
-    tstart = TIME;
-    encode(test_data_buf, test_data_encoded_buf, ndata_test);
-    cout << "encode testing data: " << elapsedTime(tstart, TIME) << std::endl;
-    cout << train_data_encoded[0] << std::endl;
-    cout << basisv[0] << std::endl;
-
-    //ibuf test_label_buf
-    double fit_time = 0;
-    double test_time = 0;
-    int test_acc = 0, train_acc = 0, pre_train_acc = 0;
-    //hdc.fit(trainOutBuf, trainLabels, trainAcc);
-    tstart = TIME;
-    fitOneShot(train_data_encoded_buf, train_labels, train_acc);
-    fit_time += elapsedTime(tstart, TIME);
-    cout << "training time: " << fit_time << std::endl;
-    // cout << "correct guesses pre: " << pre_train_acc << std::endl;
-    // cout << "correct guesses: " << train_acc << std::endl;
-    // cout << "training acc: " << ((double) train_acc) / ((double)(ndata_train)) << std::endl;
-
-    tstart = TIME;
-    testNN2(test_data_encoded_buf, test_labels, test_acc);
-    double inference_time = elapsedTime(tstart, TIME);
-    cout << "testing time: " << inference_time << std::endl;
-    cout << "correct guesses: " << test_acc << std::endl;
-    cout << "testing acc: " << ((double) test_acc) / ((double)(ndata_test)) << std::endl;
-    // FOR(i, classesv.size()){
-    //     cout << classesv[i] << std::endl;
-    //     if(i > 50) break;
-    // }
-    train_times.push_back((float)fit_time + (float)encode_training_time);
-    accuracies.push_back((float)((double) test_acc) / ((double)(ndata_test)));
+    std::cout << "Inference time: " << inference_time << std::endl;
+    std::cout << "Accuracy: " << accuracy << " " << accuracies[accuracies.size()-1] << std::endl;
 }
 
 void testInferenceBaseline(){
     
-    cout << "Enter function with dim: " << ndims << std::endl;
+    std::cout << "Enter function with dim: " << ndims << std::endl;
     q = new queue(d_selector, e_handler);
-    cout << "Hardware: " << q->get_device().get_info<info::device::name>() << std::endl;
+    std::cout << "Hardware: " << q->get_device().get_info<info::device::name>() << std::endl;
     work_group_size = q->get_device().get_info<info::device::max_work_group_size>();
 
-    cout << "reading files... " << std::endl;
+    std::cout << "reading files... " << std::endl;
 	char *testFile = strdup("data/mnist_test.choir_dat");
 	Data test = readData(testFile);
 	fvec test_data = m2v(test.data);
@@ -893,61 +482,39 @@ void testInferenceBaseline(){
 	Data train = readData(trainFile);
     fvec train_data = m2v(train.data);
 	ivec train_labels = train.labels;
-    cout << "success!" << std::endl;
+    std::cout << "success!" << std::endl;
     
 	nclasses = test.numClasses;
 	nfeatures = test.numFeatures;
 
-    cout << "classes, features: " << nclasses << " " << nfeatures << std::endl;
+    std::cout << "classes, features: " << nclasses << " " << nfeatures << std::endl;
 
-    cout << "allocate basis and class bufs" << std::endl;
+    std::cout << "allocate basis and class bufs" << std::endl;
     basisv = fvec(nfeatures*ndims, 0.0);
     basis_bufp = new fbuf(basisv);
     classesv = fvec(nclasses*ndims, 0.0);
     classes_bufp = new fbuf(classesv);
 
-    cout << "generate basis: " << nfeatures << " " << ndims << std::endl;
+    std::cout << "generate basis: " << nfeatures << " " << ndims << std::endl;
     //generate basis
     tstart = TIME;
-    srand (time(NULL));
+    host_accessor basis_a(*basis_bufp, write_only, no_init);
+
+    srand(time(NULL));
     int seed = rand();
-    q->submit([&](auto &h){
-		accessor acc(*basis_bufp, h, write_only);
-		h.parallel_for(range(nfeatures*ndims), [=](auto index) {
-			std::uint64_t offset = index.get_linear_id();
-			oneapi::dpl::minstd_rand engine(seed, offset);
-			oneapi::dpl::normal_distribution<float> distr;
-			float res = distr(engine);
-			acc[index] = res;
-		});
-	});
-	q->wait();
+
+    std::mt19937 rng(seed);
+    std::normal_distribution<float> gen{0,1};
+
+    FOR(i, nfeatures*ndims)
+        basis_a[i] = gen(rng);
     tend = TIME;
     
     int ndata_train = train_labels.size();
-    // fvec train_data_encoded(ndata_train * ndims, 0);
-    // fbuf train_data_buf(train_data);
-    // fbuf train_data_encoded_buf(train_data_encoded);
+
     int ndata_test = test_labels.size();
-    // fvec test_data_encoded(ndata_test * ndims, 0);
-    // fbuf test_data_buf(test_data);
-    // fbuf test_data_encoded_buf(test_data_encoded);
-    // tstart = TIME;
-    // encode(train_data_buf, train_data_encoded_buf, ndata_train);
-    // double encode_training_time = elapsedTime(tstart, TIME);
-    // cout << "encode training data: " << encode_training_time << std::endl;
-    // tstart = TIME;
-    // encode(test_data_buf, test_data_encoded_buf, ndata_test);
-    // cout << "encode testing data: " << elapsedTime(tstart, TIME) << std::endl;
 
-    // cout << "ndata_train: " << ndata_train << std::endl;
-    // cout << "ndata_test: " << ndata_test << std::endl;
-    
-    // tstart = TIME;
-    // testNN2(test_data_encoded_buf, test_labels, test_acc);
-    // double inference_time = elapsedTime(tstart, TIME);
-
-    std::vector<double> times(10);
+    std::vector<double> times(1);
     FOR(time_i, times.size()){
         int batches = 500;
         int inputs = 1;
@@ -965,9 +532,17 @@ void testInferenceBaseline(){
         }
         double timed = elapsedTime(tstart, TIME);
         times[time_i] = timed;
-        cout << "run #" << time_i+1 << "   time: " << timed << std::endl;
+        std::cout << "run #" << time_i+1 << "   time: " << timed << std::endl;
     }
     double average_time = 0;
     FORX(x,times) average_time += x/10.0;
-    cout << "average: " << average_time << std::endl;
+    std::cout << "average: " << average_time << std::endl;
+}
+
+
+int main(int argc, char **argv){
+    std::cout << "Starting inference only: " << ndims << std::endl;
+    //trainAndTestWithRegen();
+    testInferenceBaseline();
+    return 0;
 }
