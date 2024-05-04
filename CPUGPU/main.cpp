@@ -15,10 +15,7 @@
 // OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT 
 // (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY
 // OF SUCH DAMAGE.
-#include <CL/sycl.hpp>
-#include <oneapi/dpl/random>
-#include <oneapi/dpl/algorithm>
-#include <oneapi/dpl/iterator>
+#include <sycl/sycl.hpp>
 #include <iostream>
 #include <string>
 #include <random>
@@ -34,6 +31,7 @@
 #include <oneapi/mkl/blas.hpp>
 #include "oneapi/mkl/types.hpp"
 #include "oneapi/mkl/vm.hpp"
+#include <oneapi/dpl/random>
 #include <stdlib.h>     /* srand, rand */
 #include <time.h>       /* time */
 
@@ -41,7 +39,10 @@
 #define FOR(i,n) for(int i = 0; i < n; i++)
 #define FORX(it,iterable) for(auto &it : iterable)
 
+#define DATA_PATH PROJECT_PATH_CMAKE "/CPUGPU/data/"
+
 using namespace sycl;
+
 
 using std::cout;
 
@@ -50,8 +51,8 @@ typedef std::vector<std::vector<float>> fmat;
 typedef std::vector<float> fvec;
 typedef std::vector<int> ivec;
 
-typedef sycl::buffer<float> fbuf;
-typedef sycl::buffer<int> ibuf;
+typedef sycl::buffer<float,1> fbuf;
+typedef sycl::buffer<int,1> ibuf;
 
 typedef std::chrono::high_resolution_clock::time_point timep;
 
@@ -116,7 +117,7 @@ static fvec accuracies, inference_times, train_times, runtimes;
 
 timep tstart, tend;
 
-default_selector d_selector;
+device d_selector(default_selector_v);
 
 static auto e_handler = [](sycl::exception_list e_list) {
   for (std::exception_ptr const &e : e_list) {
@@ -313,7 +314,9 @@ void fit(fbuf &data, ivec &labels, int &correct){
     ivec indexes(labels.size());
     FOR(i, labels.size()) indexes[i] = i;
     srand(time(0));
-    std::random_shuffle(indexes.begin(), indexes.end());
+    std::random_device rd;
+    std::mt19937 g(rd());
+    std::shuffle(indexes.begin(), indexes.end(),g);
 
     int group_size = 1;
     int ndata = labels.size();
@@ -405,7 +408,9 @@ void fit2(fbuf &data, ivec &labels, int &correct){
     ivec indexes(labels.size());
     FOR(i, labels.size()) indexes[i] = i;
     srand(time(0));
-    std::random_shuffle(indexes.begin(), indexes.end());
+    std::random_device rd;
+    std::mt19937 g(rd());
+    std::shuffle(indexes.begin(), indexes.end(),g);
     //X = classes * trans(data)
     //classes: 1 class per row, dim cols
     //data: ndata per row, dim cols... trans(data): dim rows, ndata cols
@@ -663,12 +668,12 @@ void trainAndTestWithRegen(){
     work_group_size = q->get_device().get_info<info::device::max_work_group_size>();
     cout << work_group_size << std::endl;
     cout << "reading files... " << std::endl;
-	char *testFile = strdup("data/mnist_test.choir_dat");
+	char *testFile = strdup(DATA_PATH "mnist_test.choir_dat");
 	Data test = readData(testFile);
 	fvec test_data = m2v(test.data);
 	ivec test_labels = test.labels;
 
-	char* trainFile = strdup("data/mnist_train.choir_dat");
+	char* trainFile = strdup(DATA_PATH "mnist_train.choir_dat");
 	Data train = readData(trainFile);
     fvec train_data = m2v(train.data);
 	ivec train_labels = train.labels;
@@ -789,12 +794,12 @@ void trainAndTestOneShot(){
     work_group_size = q->get_device().get_info<info::device::max_work_group_size>();
 
     cout << "reading files... " << std::endl;
-	char *testFile = strdup("data/mnist_test.choir_dat");
+	char *testFile = strdup(DATA_PATH "mnist_test.choir_dat");
 	Data test = readData(testFile);
 	fvec test_data = m2v(test.data);
 	ivec test_labels = test.labels;
 
-	char* trainFile = strdup("data/mnist_train.choir_dat");
+	char* trainFile = strdup(DATA_PATH "mnist_train.choir_dat");
 	Data train = readData(trainFile);
     fvec train_data = m2v(train.data);
 	ivec train_labels = train.labels;
@@ -884,12 +889,12 @@ void testInferenceBaseline(){
     work_group_size = q->get_device().get_info<info::device::max_work_group_size>();
 
     cout << "reading files... " << std::endl;
-	char *testFile = strdup("data/mnist_test.choir_dat");
+	char *testFile = strdup(DATA_PATH "mnist_test.choir_dat");
 	Data test = readData(testFile);
 	fvec test_data = m2v(test.data);
 	ivec test_labels = test.labels;
 
-	char* trainFile = strdup("data/mnist_train.choir_dat");
+	char* trainFile = strdup(DATA_PATH "mnist_train.choir_dat");
 	Data train = readData(trainFile);
     fvec train_data = m2v(train.data);
 	ivec train_labels = train.labels;
