@@ -412,6 +412,7 @@ void fitOneShot(fbuf &data, ivec &labels, int &correct){
 }
 
 double test_times[2];
+#if 0
 void testNN(fbuf &data, ivec &labels, int &correct){
     int ndata = labels.size();
     fvec intermed(ndata * nclasses, 0);
@@ -428,12 +429,19 @@ void testNN(fbuf &data, ivec &labels, int &correct){
         num_items += group_size - (ndata % group_size);
     }
     t1 = TIME;
+
+    int sums = 0;
+
+    {
+        host_accessor b(correct_buf,read_only);
+        for(auto v:b)
+            sums += v;
+    }
+
     q->submit([&](auto &h){
         accessor intermed_a(intermed_buf, h, read_only);
         accessor label_a(label_buf, h, read_only);
         accessor correct_a(correct_buf, h, read_write);
-
-        auto sums = reduction(correct_buf,h,plus<>());
 
         int nclasses_ = nclasses;
         int ndata_ = ndata;
@@ -458,6 +466,7 @@ void testNN(fbuf &data, ivec &labels, int &correct){
     q->wait();
     test_times[1] += elapsedTime(t1,TIME);
 }
+#endif
 
 void testNN2(fbuf &data, ivec &labels, int &correct){
     int ndata = labels.size();
