@@ -20,7 +20,6 @@
 
 #include <CL/sycl.hpp>
 #include <iostream>
-#include <string>
 #include <random>
 #include <numeric>
 #include <cmath>
@@ -32,10 +31,10 @@
 #include <algorithm>
 #include <stdlib.h>     /* srand, rand */
 #include <time.h>       /* time */
-#include <oneapi/dpl/random>
 
 #if USE_ONEAPI_FUNCTIONS
 #include <mkl.h>
+#include <oneapi/dpl/random>
 #include <oneapi/mkl/blas.hpp>
 #include "oneapi/mkl/types.hpp"
 #include "oneapi/mkl/vm.hpp"
@@ -59,8 +58,8 @@ typedef std::vector<std::vector<float>> fmat;
 typedef std::vector<float> fvec;
 typedef std::vector<int> ivec;
 
-typedef sycl::buffer<float,1> fbuf;
-typedef sycl::buffer<int,1> ibuf;
+typedef buffer<float,1> fbuf;
+typedef buffer<int,1> ibuf;
 
 typedef std::chrono::high_resolution_clock::time_point timep;
 
@@ -126,7 +125,7 @@ timep tstart, tend;
 
 device d_selector(default_selector_v);
 
-static auto e_handler = [](sycl::exception_list e_list) {
+static auto e_handler = [](exception_list e_list) {
   for (std::exception_ptr const &e : e_list) {
     try {
       std::rethrow_exception(e);
@@ -188,6 +187,7 @@ void mmult(fbuf &Data_b, fbuf &Basis_b, fbuf &out_buf_b, int ndata, int ndims, i
         h.parallel_for(r, [=](auto lr){
             int dt = lr[0];
             int dim = lr[1];
+            out_buf_a[dt*ndims+dim] = 0.0;
             for(int f = 0; f < nfeat; f++) {
                 out_buf_a[dt*ndims+dim] += Data_b_a[dt*nfeat+f] * Basis_b_a[dim*nfeat+f];
             }
@@ -257,7 +257,7 @@ void encode(fbuf &data_buf, fbuf &out_buf, int ndata){
 }
 
 int cpuFit(fbuf &dataBuf, ivec &labels, fvec &classes) {
-    sycl::host_accessor data(dataBuf);
+    host_accessor data(dataBuf);
     int correct = 0;
     ivec guesses(labels.size(), 0);
     for(int i = 0; i < labels.size(); i++) {
@@ -547,7 +547,7 @@ ivec rankDims(){
         [&](int i, int j){ return (variances[i] < variances[j]); });
     return sorted_indexes;
 }
-
+#if 0
 void updateClassesAndBasis(ivec &dim_ranks){
     int dim_loss = dim_ranks.size();
     ibuf dim_ranks_buf(dim_ranks);
@@ -613,6 +613,8 @@ void trainAndTestWithRegen(const int regen_steps = 0, const int retrain_steps = 
     cout << "generate basis: " << nfeatures << " " << ndims << std::endl;
     //generate basis
     tstart = TIME;
+
+#if USE_ONEAPI_FUNCTIONS
     srand (time(NULL));
     int seed = rand();
     q->submit([&](auto &h){
@@ -625,6 +627,17 @@ void trainAndTestWithRegen(const int regen_steps = 0, const int retrain_steps = 
 			acc[index] = res;
 		});
 	});
+#else
+    {
+        host_accessor acc(*basis_bufp, write_only,no_init);
+        static std::random_device dev;
+        static std::mt19937 rng(dev());
+        static std::normal_distribution<float> gen;
+        for(int i = 0; i < nfeatures*ndims; i++) {
+            acc[i] = gen(rng);
+        }
+    }
+#endif
 	q->wait();
     tend = TIME;
     cout << "generate basis time: " << elapsedTime(tstart, tend) << std::endl;
@@ -703,6 +716,7 @@ void trainAndTestWithRegen(const int regen_steps = 0, const int retrain_steps = 
     cout << "Inference time: " << inference_time << std::endl;
     cout << "Accuracy: " << accuracy << " " << accuracies[accuracies.size()-1] << std::endl;
 }
+#endif
 
 void trainAndTestOneShot(){
     
@@ -737,6 +751,7 @@ void trainAndTestOneShot(){
     cout << "generate basis: " << nfeatures << " " << ndims << std::endl;
     //generate basis
     tstart = TIME;
+#if USE_ONEAPI_FUNCTIONS
     srand (time(NULL));
     int seed = rand();
     q->submit([&](auto &h){
@@ -749,6 +764,17 @@ void trainAndTestOneShot(){
 			acc[index] = res;
 		});
 	});
+#else
+    {
+        host_accessor acc(*basis_bufp, write_only,no_init);
+        static std::random_device dev;
+        static std::mt19937 rng(dev());
+        static std::normal_distribution<float> gen;
+        for(int i = 0; i < nfeatures*ndims; i++) {
+            acc[i] = gen(rng);
+        }
+    }
+#endif
 	q->wait();
     tend = TIME;
     cout << "generate basis time: " << elapsedTime(tstart, tend) << std::endl;
@@ -794,6 +820,7 @@ void trainAndTestOneShot(){
     accuracies.push_back((float)((double) test_acc) / ((double)(ndata_test)));
 }
 
+#if 0
 void testInferenceBaseline(){
     
     cout << "Enter function with dim: " << ndims << std::endl;
@@ -869,7 +896,7 @@ void testInferenceBaseline(){
     FORX(x,times) average_time += x/10.0;
     cout << "average: " << average_time << std::endl;
 }
-
+#endif
 int main(int argc, char **argv){
 	ndims = 2000;
 	if(argc > 1) {

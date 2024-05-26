@@ -1,4 +1,5 @@
 build
+build-acpp
 *.choir_dat
 
 # Created by https://www.toptal.com/developers/gitignore/api/c++,cmake
